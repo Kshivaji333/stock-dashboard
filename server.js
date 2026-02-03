@@ -9,14 +9,12 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = 5000;
+const PORT = process.env.PORT || 5000; // Use Render's port
 const DATA_FILE = path.join(__dirname, 'daily_data.json');
 const NSE_URL = 'https://www.nseindia.com/market-data/top-gainers-losers';
 const GROWW_URL = 'https://groww.in/stocks/most-bought-stocks-on-groww';
 
-// --- GLOBAL CONTROL SWITCH ---
-// CHANGE: Default is TRUE (Paused) so it doesn't run automatically
-let isTrackingPaused = true;
+let isTrackingPaused = true; 
 
 // --- HELPER: Read/Write Data File ---
 function getStoredData() {
@@ -38,25 +36,43 @@ function normalize(str) {
     return str.toUpperCase().replace(/LTD|LIMITED/g, '').replace(/[^A-Z0-9]/g, '');
 }
 
+// --- OPTIMIZED BROWSER LAUNCHER ---
+async function getBrowser() {
+    return await puppeteer.launch({ 
+        headless: "new", 
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage', // Vital for Render
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process', // Dangerously aggressive memory saving
+            '--disable-gpu'
+        ] 
+    });
+}
+
 // --- SCRAPERS ---
 async function scrapeNSE() {
     console.log("Launching browser for NSE...");
-    // REPLACE THIS LINE IN BOTH SCRAPER FUNCTIONS
-    const browser = await puppeteer.launch({
-        headless: "new",
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage', // Vital for Render's memory limits
-            '--disable-gpu'
-        ]
-    });
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-
+    const browser = await getBrowser();
+    
     try {
-        await page.goto(NSE_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-        await page.waitForSelector('#topgainer-Table', { timeout: 10000 });
+        const page = await browser.newPage();
+        
+        // Block images/fonts to save memory
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            if (['image', 'stylesheet', 'font'].includes(req.resourceType())) {
+                req.abort();
+            } else {
+                req.continue();
+            }
+        });
+
+        await page.goto(NSE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.waitForSelector('#topgainer-Table', { timeout: 15000 });
 
         const stocks = await page.evaluate(() => {
             const results = [];
@@ -79,29 +95,28 @@ async function scrapeNSE() {
         return stocks;
     } catch (error) {
         console.error("NSE Scraping Error:", error.message);
-        await browser.close();
+        if(browser) await browser.close();
         return [];
     }
 }
 
 async function scrapeGroww(targetSymbols) {
     console.log("Launching browser for Groww...");
-    // REPLACE THIS LINE IN BOTH SCRAPER FUNCTIONS
-    const browser = await puppeteer.launch({
-        headless: "new",
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage', // Vital for Render's memory limits
-            '--disable-gpu'
-        ]
-    });
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    const browser = await getBrowser();
     const growwData = {};
 
     try {
-        await page.goto(GROWW_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+        const page = await browser.newPage();
+        
+        // Block resources
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            if (['image', 'stylesheet', 'font'].includes(req.resourceType())) req.abort();
+            else req.continue();
+        });
+
+        await page.goto(GROWW_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        
         const mostBoughtList = await page.evaluate(() => {
             return Array.from(document.querySelectorAll('a.seeMore_companyNameLink__lvbvi')).map(link => ({
                 name: link.innerText.trim(),
@@ -109,6 +124,7 @@ async function scrapeGroww(targetSymbols) {
             }));
         });
 
+        // OPTIMIZATION: Reuse the SAME page/tab instead of opening new ones
         for (const symbol of targetSymbols) {
             const normalizedTarget = normalize(symbol);
             const match = mostBoughtList.find(g => {
@@ -117,12 +133,13 @@ async function scrapeGroww(targetSymbols) {
             });
 
             if (match) {
-                const stockPage = await browser.newPage();
                 try {
-                    await stockPage.goto(`https://groww.in${match.link}`, { waitUntil: 'networkidle2' });
-                    try { await stockPage.waitForSelector('.shp76Row', { timeout: 5000 }); } catch (e) { }
-
-                    const shareholding = await stockPage.evaluate(() => {
+                    await page.goto(`https://groww.in${match.link}`, { waitUntil: 'domcontentloaded' });
+                    
+                    // Fast wait
+                    try { await page.waitForSelector('.shp76Row', { timeout: 3000 }); } catch (e) {}
+                    
+                    const shareholding = await page.evaluate(() => {
                         const pattern = {};
                         document.querySelectorAll('.shp76Row').forEach(row => {
                             const cat = row.querySelector('.bodyLarge')?.innerText;
@@ -135,7 +152,6 @@ async function scrapeGroww(targetSymbols) {
                 } catch (e) {
                     growwData[symbol] = { inMostBought: true, growwName: match.name, shareholding: "Error" };
                 }
-                await stockPage.close();
             } else {
                 growwData[symbol] = { inMostBought: false, shareholding: null };
             }
@@ -144,7 +160,7 @@ async function scrapeGroww(targetSymbols) {
         return growwData;
     } catch (error) {
         console.error("Groww Error:", error);
-        await browser.close();
+        if(browser) await browser.close();
         return {};
     }
 }
@@ -160,7 +176,6 @@ async function startDay() {
 
     const growwDetails = await scrapeGroww(top5);
 
-    // CHANGE: Create the FIRST history entry immediately so volume shows on UI
     const initialSnapshot = {
         time: "Market Open",
         updates: top5.map(symbol => {
@@ -174,32 +189,30 @@ async function startDay() {
         })
     };
 
-    saveData({
-        date: new Date().toDateString(),
-        targetStocks: top5,
-        growwData: growwDetails,
-        history: [initialSnapshot] // Save with initial history
+    saveData({ 
+        date: new Date().toDateString(), 
+        targetStocks: top5, 
+        growwData: growwDetails, 
+        history: [initialSnapshot] 
     });
-    console.log("✅ Day Initialized with Baseline Volume.");
+    console.log("✅ Day Initialized.");
 }
 
 async function trackProgress() {
-    // *** PAUSE CHECK ***
     if (isTrackingPaused) {
-        console.log("⏸️ Tracking is PAUSED. Skipping cycle.");
+        console.log("⏸️ Tracking is PAUSED.");
         return;
     }
 
     let data = getStoredData();
     if (!data.targetStocks || data.targetStocks.length === 0) {
-        // If no data exists, run startDay but respect pause
         if (!isTrackingPaused) await startDay();
         return;
     }
 
     console.log(`--- TRACKING ${new Date().toLocaleTimeString()} ---`);
     const currentMarketData = await scrapeNSE();
-
+    
     // Groww Update
     const updatedGrowwData = await scrapeGroww(data.targetStocks);
     if (Object.keys(updatedGrowwData).length > 0) data.growwData = updatedGrowwData;
@@ -229,11 +242,10 @@ async function trackProgress() {
 }
 
 // --- SCHEDULER ---
-// Only runs if not paused
 cron.schedule('15 9 * * *', () => {
-    if (!isTrackingPaused) startDay();
-});
-cron.schedule('*/10 9-15 * * *', () => {
+    if(!isTrackingPaused) startDay();
+}); 
+cron.schedule('*/10 9-15 * * *', () => { 
     const h = new Date().getHours();
     if (h >= 9 && h <= 15) trackProgress();
 });
@@ -243,34 +255,33 @@ app.get('/api/data', (req, res) => res.json({ ...getStoredData(), isPaused: isTr
 
 app.get('/api/control/pause', (req, res) => {
     isTrackingPaused = true;
-    console.log("⏸️ SYSTEM PAUSED BY USER");
+    console.log("⏸️ SYSTEM PAUSED");
     res.json({ message: "Paused", isPaused: true });
 });
 
 app.get('/api/control/resume', (req, res) => {
     isTrackingPaused = false;
-    console.log("▶️ SYSTEM RESUMED BY USER");
-    // If we resume and there is no data, start the day
+    console.log("▶️ SYSTEM RESUMED");
     const data = getStoredData();
     if (!data.targetStocks || data.targetStocks.length === 0) {
         startDay();
     } else {
-        trackProgress(); // Run one check immediately on resume
+        trackProgress();
     }
     res.json({ message: "Resumed", isPaused: false });
 });
 
 app.get('/api/control/force-fetch', async (req, res) => {
-    console.log("⚡ FORCE FETCH TRIGGERED");
+    console.log("⚡ FORCE FETCH");
     const wasPaused = isTrackingPaused;
-    isTrackingPaused = false;
+    isTrackingPaused = false; 
     await trackProgress();
-    isTrackingPaused = wasPaused;
+    isTrackingPaused = wasPaused; 
     res.json({ message: "Fetch Complete" });
 });
 
 app.get('/api/control/restart-day', async (req, res) => {
-    console.log("🔄 RESTART DAY TRIGGERED");
+    console.log("🔄 RESTART DAY");
     await startDay();
     res.json({ message: "Day Reset Complete" });
 });
@@ -286,8 +297,6 @@ app.get(/(.*)/, (req, res) => {
 
 app.listen(PORT, async () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    // We do NOT auto-start startDay() here anymore. 
-    // It waits for user to click "Start" or "Restart Day" if file is empty.
     if (!fs.existsSync(DATA_FILE)) {
         console.log("ℹ️ No data file. Waiting for user to Start Tracking.");
     }
