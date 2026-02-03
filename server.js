@@ -10,12 +10,13 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = 5000;
-const DATA_FILE = path.join(__dirname, 'daily_data.json'); // Better path handling
+const DATA_FILE = path.join(__dirname, 'daily_data.json');
 const NSE_URL = 'https://www.nseindia.com/market-data/top-gainers-losers';
 const GROWW_URL = 'https://groww.in/stocks/most-bought-stocks-on-groww';
 
 // --- GLOBAL CONTROL SWITCH ---
-let isTrackingPaused = false;
+// CHANGE: Default is TRUE (Paused) so it doesn't run automatically
+let isTrackingPaused = true; 
 
 // --- HELPER: Read/Write Data File ---
 function getStoredData() {
@@ -37,7 +38,7 @@ function normalize(str) {
     return str.toUpperCase().replace(/LTD|LIMITED/g, '').replace(/[^A-Z0-9]/g, '');
 }
 
-// --- SCRAPERS (Unchanged logic, just compacted for readability) ---
+// --- SCRAPERS ---
 async function scrapeNSE() {
     console.log("Launching browser for NSE...");
     const browser = await puppeteer.launch({ headless: "new", args: ['--no-sandbox'] });
@@ -140,8 +141,28 @@ async function startDay() {
     if (top5.length === 0) { console.log("❌ No data from NSE."); return; }
 
     const growwDetails = await scrapeGroww(top5);
-    saveData({ date: new Date().toDateString(), targetStocks: top5, growwData: growwDetails, history: [] });
-    console.log("✅ Day Initialized.");
+
+    // CHANGE: Create the FIRST history entry immediately so volume shows on UI
+    const initialSnapshot = {
+        time: "Market Open",
+        updates: top5.map(symbol => {
+            const stock = allStocks.find(s => s.symbol === symbol);
+            return {
+                symbol: symbol,
+                volume: stock ? stock.volume : 0,
+                status: "Active",
+                change: "Base Vol"
+            };
+        })
+    };
+
+    saveData({ 
+        date: new Date().toDateString(), 
+        targetStocks: top5, 
+        growwData: growwDetails, 
+        history: [initialSnapshot] // Save with initial history
+    });
+    console.log("✅ Day Initialized with Baseline Volume.");
 }
 
 async function trackProgress() {
@@ -153,9 +174,9 @@ async function trackProgress() {
 
     let data = getStoredData();
     if (!data.targetStocks || data.targetStocks.length === 0) {
-        await startDay();
-        data = getStoredData();
-        if (!data.targetStocks) return;
+        // If no data exists, run startDay but respect pause
+        if (!isTrackingPaused) await startDay();
+        return;
     }
 
     console.log(`--- TRACKING ${new Date().toLocaleTimeString()} ---`);
@@ -169,7 +190,7 @@ async function trackProgress() {
     const snapshot = { time: new Date().toLocaleTimeString(), updates: [] };
     data.targetStocks.forEach(symbol => {
         const found = currentMarketData.find(s => s.symbol === symbol);
-        let change = "First Entry";
+        let change = "0";
         if (found) {
             if (data.history.length > 0) {
                 const last = data.history[data.history.length - 1].updates.find(u => u.symbol === symbol);
@@ -190,8 +211,11 @@ async function trackProgress() {
 }
 
 // --- SCHEDULER ---
-cron.schedule('15 9 * * *', startDay); // Daily Reset
-cron.schedule('*/10 9-15 * * *', () => { // 10-min Tracker
+// Only runs if not paused
+cron.schedule('15 9 * * *', () => {
+    if(!isTrackingPaused) startDay();
+}); 
+cron.schedule('*/10 9-15 * * *', () => { 
     const h = new Date().getHours();
     if (h >= 9 && h <= 15) trackProgress();
 });
@@ -208,16 +232,22 @@ app.get('/api/control/pause', (req, res) => {
 app.get('/api/control/resume', (req, res) => {
     isTrackingPaused = false;
     console.log("▶️ SYSTEM RESUMED BY USER");
+    // If we resume and there is no data, start the day
+    const data = getStoredData();
+    if (!data.targetStocks || data.targetStocks.length === 0) {
+        startDay();
+    } else {
+        trackProgress(); // Run one check immediately on resume
+    }
     res.json({ message: "Resumed", isPaused: false });
 });
 
 app.get('/api/control/force-fetch', async (req, res) => {
     console.log("⚡ FORCE FETCH TRIGGERED");
-    // Temporarily ignore pause for manual fetch
     const wasPaused = isTrackingPaused;
     isTrackingPaused = false; 
     await trackProgress();
-    isTrackingPaused = wasPaused; // Restore state
+    isTrackingPaused = wasPaused; 
     res.json({ message: "Fetch Complete" });
 });
 
@@ -229,9 +259,7 @@ app.get('/api/control/restart-day', async (req, res) => {
 
 // --- SERVE FRONTEND ---
 app.use(express.static(path.join(__dirname, 'client/build')));
-// CHANGE '*' TO /(.*)/
 app.get(/(.*)/, (req, res) => {
-    // Check if the request is for the API, if so, don't serve React
     if (req.path.startsWith('/api') || req.path.startsWith('/data')) {
         return res.status(404).send("API endpoint not found");
     }
@@ -240,5 +268,9 @@ app.get(/(.*)/, (req, res) => {
 
 app.listen(PORT, async () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    if (!fs.existsSync(DATA_FILE)) await startDay();
+    // We do NOT auto-start startDay() here anymore. 
+    // It waits for user to click "Start" or "Restart Day" if file is empty.
+    if (!fs.existsSync(DATA_FILE)) {
+        console.log("ℹ️ No data file. Waiting for user to Start Tracking.");
+    }
 });

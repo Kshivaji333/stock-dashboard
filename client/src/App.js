@@ -8,17 +8,16 @@ function App() {
   const [isPaused, setIsPaused] = useState(false);
   const [actionStatus, setActionStatus] = useState("");
 
- const fetchData = async () => {
-  try {
-    // ✅ CORRECT: Use relative path (works in Prod & Dev with Proxy)
-    const response = await axios.get('/api/data'); 
-    setData(response.data);
-    setIsPaused(response.data.isPaused);
-    setLoading(false);
-  } catch (error) {
-    console.error("Error fetching data:", error);
-  }
-};
+  const fetchData = async () => {
+    try {
+      const response = await axios.get('/api/data');
+      setData(response.data);
+      setIsPaused(response.data.isPaused);
+      setLoading(false);
+    } catch (error) {
+      console.error("Error fetching data:", error);
+    }
+  };
 
   useEffect(() => {
     fetchData();
@@ -26,37 +25,50 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // --- CONTROL FUNCTIONS ---
-// Inside src/App.js
+  const handleControl = async (endpoint, label) => {
+    setActionStatus(`Executing: ${label}...`);
+    try {
+      await axios.get(`/api/control/${endpoint}`);
+      setActionStatus(`Success: ${label}`);
+      fetchData();
+      setTimeout(() => setActionStatus(""), 3000);
+    } catch (error) {
+      setActionStatus(`Error: ${label}`);
+    }
+  };
 
-const handleControl = async (endpoint, label) => {
-  setActionStatus(`Executing: ${label}...`);
-  try {
-    // CHANGE THIS LINE: Add http://localhost:5000
-    await axios.get(`/api/control/${endpoint}`);
-    setActionStatus(`Success: ${label}`);
-    fetchData(); 
-    setTimeout(() => setActionStatus(""), 3000);
-  } catch (error) {
-    setActionStatus(`Error: ${label}`);
+  if (loading) return <div className="loading">Connecting to Server...</div>;
+  
+  // Handling case where server is running but no data exists yet
+  if (!data || !data.targetStocks || data.targetStocks.length === 0) {
+      return (
+        <div className="dashboard">
+             <header className="header">
+                <h1>🚀 Stock Tracker</h1>
+             </header>
+             <div className="empty-state">
+                <h2>Ready to Start</h2>
+                <p>System is paused. Click below to initialize today's tracking.</p>
+                <button className="btn btn-resume" onClick={() => handleControl('resume', "Starting System")}>
+                    ▶ START TRACKING
+                </button>
+             </div>
+        </div>
+      )
   }
-};
-
-  if (loading) return <div className="loading">Loading Market Data...</div>;
-  if (!data || !data.targetStocks) return <div className="loading">Initializing System...</div>;
 
   return (
     <div className="dashboard">
       <header className="header">
         <h1>🚀 10m Volume & Groww Tracker</h1>
         
-        {/* --- CONTROL PANEL --- */}
+        {/* CONTROL PANEL */}
         <div className="control-panel">
             <button 
                 className={`btn ${isPaused ? 'btn-resume' : 'btn-pause'}`} 
                 onClick={() => handleControl(isPaused ? 'resume' : 'pause', isPaused ? "Resuming" : "Pausing")}
             >
-                {isPaused ? "▶ RESUME Tracking" : "⏸ PAUSE Tracking"}
+                {isPaused ? "▶ RESUME TRACKING" : "⏸ PAUSE TRACKING"}
             </button>
             
             <button className="btn btn-fetch" onClick={() => handleControl('force-fetch', "Force Fetch")}>
@@ -71,21 +83,23 @@ const handleControl = async (endpoint, label) => {
             </button>
         </div>
         
-        {/* STATUS MESSAGE */}
+        {/* STATUS MESSAGE (Timer Removed) */}
         <div className="system-status">
             {actionStatus && <span className="action-msg">{actionStatus}</span>}
             <span className="meta-info">Status: {isPaused ? <span className="red">PAUSED</span> : <span className="green">RUNNING</span>}</span>
-            <span className="meta-info">Last Updated: {new Date().toLocaleTimeString()}</span>
         </div>
       </header>
 
-      {/* STOCK CARDS */}
+      {/* CARDS */}
       <div className="cards-container">
         {data.targetStocks.map((symbol) => {
           const growwInfo = data.growwData ? data.growwData[symbol] : null;
+          
+          // Get the very last update
           const latestUpdate = data.history.length > 0 
             ? data.history[data.history.length - 1].updates.find(u => u.symbol === symbol)
             : null;
+
           const isDisappeared = latestUpdate?.status === "Disappeared";
 
           return (
@@ -96,29 +110,38 @@ const handleControl = async (endpoint, label) => {
                   {isDisappeared ? "⚠️ GONE" : "● ACTIVE"}
                 </span>
               </div>
+              
               <div className="stat-row">
                 <span className="label">Volume:</span>
                 <span className="value">{latestUpdate ? latestUpdate.volume.toLocaleString() : "Loading..."}</span>
               </div>
+              
               <div className="stat-row">
                 <span className="label">Change:</span>
                 <span className={`value ${latestUpdate && latestUpdate.change.includes('+') ? 'green' : 'red'}`}>
                   {latestUpdate ? latestUpdate.change : "0"}
                 </span>
               </div>
+
               <div className="groww-section">
                 <div className={`badge ${growwInfo?.inMostBought ? 'badge-green' : 'badge-gray'}`}>
                   {growwInfo?.inMostBought ? "🔥 Groww Top Bought" : "Not in Top List"}
                 </div>
-                {growwInfo?.shareholding && typeof growwInfo.shareholding === 'object' && (
+                
+                {/* Shareholding Rendering Logic */}
+                {growwInfo?.shareholding && typeof growwInfo.shareholding === 'object' ? (
                   <div className="shareholding">
                     <strong>Shareholding:</strong>
                     <ul>
-                      {Object.entries(growwInfo.shareholding).slice(0, 3).map(([key, val]) => (
+                      {Object.entries(growwInfo.shareholding).map(([key, val]) => (
                         <li key={key}><span>{key}:</span> <span>{val}</span></li>
                       ))}
                     </ul>
                   </div>
+                ) : (
+                    <div className="shareholding-error">
+                        {typeof growwInfo?.shareholding === 'string' ? growwInfo.shareholding : "No Data"}
+                    </div>
                 )}
               </div>
             </div>
@@ -126,7 +149,7 @@ const handleControl = async (endpoint, label) => {
         })}
       </div>
 
-      {/* HISTORY TABLE */}
+      {/* TABLE */}
       <div className="history-section">
         <h3>📊 History Log</h3>
         <div className="table-wrapper">
