@@ -16,7 +16,7 @@ const GROWW_URL = 'https://groww.in/stocks/most-bought-stocks-on-groww';
 
 // --- GLOBAL CONTROL SWITCH ---
 // CHANGE: Default is TRUE (Paused) so it doesn't run automatically
-let isTrackingPaused = true; 
+let isTrackingPaused = true;
 
 // --- HELPER: Read/Write Data File ---
 function getStoredData() {
@@ -41,7 +41,16 @@ function normalize(str) {
 // --- SCRAPERS ---
 async function scrapeNSE() {
     console.log("Launching browser for NSE...");
-    const browser = await puppeteer.launch({ headless: "new", args: ['--no-sandbox'] });
+    // REPLACE THIS LINE IN BOTH SCRAPER FUNCTIONS
+    const browser = await puppeteer.launch({
+        headless: "new",
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage', // Vital for Render's memory limits
+            '--disable-gpu'
+        ]
+    });
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
@@ -77,7 +86,16 @@ async function scrapeNSE() {
 
 async function scrapeGroww(targetSymbols) {
     console.log("Launching browser for Groww...");
-    const browser = await puppeteer.launch({ headless: "new", args: ['--no-sandbox'] });
+    // REPLACE THIS LINE IN BOTH SCRAPER FUNCTIONS
+    const browser = await puppeteer.launch({
+        headless: "new",
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage', // Vital for Render's memory limits
+            '--disable-gpu'
+        ]
+    });
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     const growwData = {};
@@ -102,8 +120,8 @@ async function scrapeGroww(targetSymbols) {
                 const stockPage = await browser.newPage();
                 try {
                     await stockPage.goto(`https://groww.in${match.link}`, { waitUntil: 'networkidle2' });
-                    try { await stockPage.waitForSelector('.shp76Row', { timeout: 5000 }); } catch (e) {}
-                    
+                    try { await stockPage.waitForSelector('.shp76Row', { timeout: 5000 }); } catch (e) { }
+
                     const shareholding = await stockPage.evaluate(() => {
                         const pattern = {};
                         document.querySelectorAll('.shp76Row').forEach(row => {
@@ -156,10 +174,10 @@ async function startDay() {
         })
     };
 
-    saveData({ 
-        date: new Date().toDateString(), 
-        targetStocks: top5, 
-        growwData: growwDetails, 
+    saveData({
+        date: new Date().toDateString(),
+        targetStocks: top5,
+        growwData: growwDetails,
         history: [initialSnapshot] // Save with initial history
     });
     console.log("✅ Day Initialized with Baseline Volume.");
@@ -181,7 +199,7 @@ async function trackProgress() {
 
     console.log(`--- TRACKING ${new Date().toLocaleTimeString()} ---`);
     const currentMarketData = await scrapeNSE();
-    
+
     // Groww Update
     const updatedGrowwData = await scrapeGroww(data.targetStocks);
     if (Object.keys(updatedGrowwData).length > 0) data.growwData = updatedGrowwData;
@@ -213,9 +231,9 @@ async function trackProgress() {
 // --- SCHEDULER ---
 // Only runs if not paused
 cron.schedule('15 9 * * *', () => {
-    if(!isTrackingPaused) startDay();
-}); 
-cron.schedule('*/10 9-15 * * *', () => { 
+    if (!isTrackingPaused) startDay();
+});
+cron.schedule('*/10 9-15 * * *', () => {
     const h = new Date().getHours();
     if (h >= 9 && h <= 15) trackProgress();
 });
@@ -245,9 +263,9 @@ app.get('/api/control/resume', (req, res) => {
 app.get('/api/control/force-fetch', async (req, res) => {
     console.log("⚡ FORCE FETCH TRIGGERED");
     const wasPaused = isTrackingPaused;
-    isTrackingPaused = false; 
+    isTrackingPaused = false;
     await trackProgress();
-    isTrackingPaused = wasPaused; 
+    isTrackingPaused = wasPaused;
     res.json({ message: "Fetch Complete" });
 });
 

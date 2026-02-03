@@ -3,10 +3,12 @@
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
-  "scripts": {
-    "start": "node server.js",
-    "build": "npm install && cd client && npm install && npm run build"
-  },
+"scripts": {
+  "start": "node server.js",
+  "build": "npm install && cd client && npm install && npm run build",
+  "postinstall": "npx puppeteer browsers install chrome"
+},
+
   "keywords": [],
   "author": "",
   "license": "ISC",
