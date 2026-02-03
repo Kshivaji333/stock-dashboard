@@ -36,18 +36,22 @@ function normalize(str) {
     return str.toUpperCase().replace(/LTD|LIMITED/g, '').replace(/[^A-Z0-9]/g, '');
 }
 
-// --- OPTIMIZED BROWSER LAUNCHER ---
+// --- OPTIMIZED BROWSER LAUNCHER (FIXED FOR RENDER) ---
 async function getBrowser() {
     return await puppeteer.launch({ 
         headless: "new", 
+        // INCREASE TIMEOUT: Give Render 2 minutes to start Chrome (vs default 30s)
+        timeout: 120000, 
+        // KEY FIX: Pipe logs to stdout. This often fixes the "WS Endpoint" timeout on Render
+        dumpio: true,
         args: [
             '--no-sandbox', 
             '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage', // Vital for Render
+            '--disable-dev-shm-usage', // Vital for Render's memory limits
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
-            '--single-process', // Dangerously aggressive memory saving
+            '--single-process', 
             '--disable-gpu'
         ] 
     });
