@@ -19,6 +19,7 @@ let isTrackingPaused = true;
 let isScanning = false; 
 
 // --- TIMEZONE HELPERS (Forces IST) ---
+const IST_HOUR_FORMATTER = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false });
 function getISTTime() {
     return new Date().toLocaleTimeString('en-IN', { 
         timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true 
@@ -28,18 +29,35 @@ function getISTDate() {
     return new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' });
 }
 function getISTHour() {
-    const now = new Date().toLocaleString("en-US", {timeZone: "Asia/Kolkata"});
-    return new Date(now).getHours();
+    return Number(IST_HOUR_FORMATTER.format(new Date()));
 }
 
 // --- DATA MANAGEMENT ---
+function emptyData() {
+    return { date: getISTDate(), targetStocks: [], growwData: {}, history: [] };
+}
+function isDataStale(data) {
+    return !data || !data.date || data.date !== getISTDate();
+}
 function getStoredData() {
-    if (!fs.existsSync(DATA_FILE)) return { targetStocks: [], growwData: {}, history: [] };
-    const rawData = fs.readFileSync(DATA_FILE);
-    try { return JSON.parse(rawData); } catch (e) { return { targetStocks: [], growwData: {}, history: [] }; }
+    if (!fs.existsSync(DATA_FILE)) return emptyData();
+    try {
+        const rawData = fs.readFileSync(DATA_FILE, 'utf8');
+        const parsed = JSON.parse(rawData);
+        return parsed && typeof parsed === 'object' ? parsed : emptyData();
+    } catch (e) {
+        console.error("Data read error:", e.message);
+        return emptyData();
+    }
 }
 function saveData(data) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+    try {
+        const tmpFile = `${DATA_FILE}.tmp`;
+        fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2));
+        fs.renameSync(tmpFile, DATA_FILE);
+    } catch (e) {
+        console.error("Data write error:", e.message);
+    }
 }
 function normalize(str) {
     if (!str) return "";
@@ -49,11 +67,13 @@ function normalize(str) {
 // --- STABLE BROWSER LAUNCHER ---
 async function getBrowser() {
     const isWindows = process.platform === 'win32';
+    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
     
     // CONFIGURATION 1: WINDOWS (Local Development) - Minimal args for maximum stability
     if (isWindows) {
         return await puppeteer.launch({ 
             headless: "new",
+            ...(executablePath ? { executablePath } : {}),
             args: ['--no-sandbox', '--window-size=1920,1080']
         });
     }
@@ -63,6 +83,7 @@ async function getBrowser() {
         headless: "new", 
         timeout: 60000, 
         dumpio: false, 
+        ...(executablePath ? { executablePath } : {}),
         args: [
             '--no-sandbox', 
             '--disable-setuid-sandbox', 
@@ -87,6 +108,10 @@ async function scrapeNSE() {
         
         // Basic Stealth
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.nseindia.com/'
+        });
         
         // Resource Blocking (Speed + Memory)
         await page.setRequestInterception(true);
@@ -96,7 +121,8 @@ async function scrapeNSE() {
         });
 
         // Increased timeout for slow networks
-        await page.goto(NSE_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+        await page.goto('https://www.nseindia.com', { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.goto(NSE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
         await page.waitForSelector('#topgainer-Table', { timeout: 30000 });
 
         const stocks = await page.evaluate(() => {
@@ -144,7 +170,16 @@ async function scrapeGroww(targetSymbols) {
         
         const mostBoughtList = await page.evaluate(() => {
             const anchors = Array.from(document.querySelectorAll('a[href^="/stocks/"]'));
-            return anchors.map(link => ({ name: link.innerText.trim(), link: link.getAttribute('href') }));
+            const items = anchors
+                .map(link => ({ name: link.innerText.trim(), link: link.getAttribute('href') }))
+                .filter(item => item.name && item.link);
+            const seen = new Set();
+            return items.filter(item => {
+                const key = `${item.name}|${item.link}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
         });
 
         for (const symbol of targetSymbols) {
@@ -207,7 +242,7 @@ async function startDay() {
         const top5 = allStocks.slice(0, 5).map(s => s.symbol);
 
         if (top5.length === 0) { 
-            console.log("❌ No data from NSE."); 
+            console.log("ERROR: No data from NSE."); 
             return; 
         }
 
@@ -221,7 +256,7 @@ async function startDay() {
         };
 
         saveData({ date: getISTDate(), targetStocks: top5, growwData: growwDetails, history: [initialSnapshot] });
-        console.log("✅ Day Initialized.");
+        console.log("OK: Day initialized.");
     } catch (e) {
         console.error("Critical Error in startDay:", e);
     } finally {
@@ -230,13 +265,19 @@ async function startDay() {
 }
 
 async function trackProgress() {
-    if (isTrackingPaused) { console.log("⏸️ Paused."); return; }
-    if (isScanning) { console.log("⚠️ Scan already in progress."); return; }
+    if (isTrackingPaused) { console.log("Paused."); return; }
+    if (isScanning) { console.log("Scan already in progress."); return; }
     
     isScanning = true; 
     
     try {
         let data = getStoredData();
+        if (isDataStale(data)) {
+            console.log("Stale data found. Starting new day.");
+            isScanning = false; // Unlock before starting day
+            if (!isTrackingPaused) await startDay();
+            return;
+        }
         
         if (!data.targetStocks || data.targetStocks.length === 0) {
             isScanning = false; // Unlock before starting day
@@ -269,7 +310,7 @@ async function trackProgress() {
 
         data.history.push(snapshot);
         saveData(data);
-        console.log("✅ Data Saved.");
+        console.log("OK: Data saved.");
     } catch (e) {
         console.error("Critical Error in trackProgress:", e);
     } finally {
@@ -285,7 +326,12 @@ cron.schedule('*/10 9-15 * * *', () => {
 }, { timezone: "Asia/Kolkata" });
 
 // --- APIs ---
-app.get('/api/data', (req, res) => res.json({ ...getStoredData(), isPaused: isTrackingPaused, isScanning })); 
+app.get('/api/data', (req, res) => {
+    const data = getStoredData();
+    const stale = isDataStale(data);
+    const responseData = stale ? emptyData() : data;
+    res.json({ ...responseData, isPaused: isTrackingPaused, isScanning, isStale: stale });
+}); 
 
 app.get('/api/control/pause', (req, res) => {
     isTrackingPaused = true;
@@ -295,13 +341,13 @@ app.get('/api/control/pause', (req, res) => {
 app.get('/api/control/resume', (req, res) => {
     isTrackingPaused = false;
     const data = getStoredData();
-    if (!data.targetStocks || data.targetStocks.length === 0) startDay();
+    if (isDataStale(data) || !data.targetStocks || data.targetStocks.length === 0) startDay();
     else trackProgress();
     res.json({ message: "Resumed", isPaused: false });
 });
 
 app.get('/api/control/force-fetch', async (req, res) => {
-    if (isScanning) return res.status(429).json({ message: "⚠️ Scan already running!" });
+    if (isScanning) return res.status(429).json({ message: "Scan already running!" });
     
     const wasPaused = isTrackingPaused;
     isTrackingPaused = false; 
@@ -315,7 +361,7 @@ app.get('/api/control/force-fetch', async (req, res) => {
 });
 
 app.get('/api/control/restart-day', async (req, res) => {
-    if (isScanning) return res.status(429).json({ message: "⚠️ Scan already running!" });
+    if (isScanning) return res.status(429).json({ message: "Scan already running!" });
     startDay(); 
     res.json({ message: "Day Reset Triggered" });
 });
@@ -328,5 +374,5 @@ app.get(/(.*)/, (req, res) => {
 
 app.listen(PORT, async () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    if (!fs.existsSync(DATA_FILE)) console.log("ℹ️ No data file.");
+    if (!fs.existsSync(DATA_FILE)) console.log("Info: No data file.");
 });
