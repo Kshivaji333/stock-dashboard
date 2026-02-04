@@ -16,6 +16,28 @@ const GROWW_URL = 'https://groww.in/stocks/most-bought-stocks-on-groww';
 
 let isTrackingPaused = true; 
 
+// --- TIMEZONE HELPERS (Fixes the 9:40 AM issue) ---
+function getISTTime() {
+    return new Date().toLocaleTimeString('en-IN', { 
+        timeZone: 'Asia/Kolkata', 
+        hour: '2-digit', 
+        minute: '2-digit', 
+        second: '2-digit', 
+        hour12: true 
+    });
+}
+
+function getISTDate() {
+    return new Date().toLocaleDateString('en-IN', { 
+        timeZone: 'Asia/Kolkata' 
+    });
+}
+
+function getISTHour() {
+    const now = new Date().toLocaleString("en-US", {timeZone: "Asia/Kolkata"});
+    return new Date(now).getHours();
+}
+
 // --- HELPER: Read/Write Data File ---
 function getStoredData() {
     if (!fs.existsSync(DATA_FILE)) return { targetStocks: [], growwData: {}, history: [] };
@@ -36,47 +58,35 @@ function normalize(str) {
     return str.toUpperCase().replace(/LTD|LIMITED/g, '').replace(/[^A-Z0-9]/g, '');
 }
 
-// --- SMART BROWSER LAUNCHER (Auto-detects Windows vs Linux) ---
+// --- BROWSER LAUNCHER ---
 async function getBrowser() {
-    const isWindows = process.platform === 'win32';
-    
-    // Base arguments that work everywhere
-    let launchArgs = [
-        '--no-sandbox', 
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled', 
-        '--window-size=1920,1080'
-    ];
-
-    // Add aggressive memory saving ONLY if NOT on Windows (i.e., on Render)
-    if (!isWindows) {
-        launchArgs.push(
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process', // This was crashing Windows
-            '--disable-gpu'
-        );
-    }
-
     return await puppeteer.launch({ 
         headless: "new", 
         timeout: 60000, 
         dumpio: false, 
-        args: launchArgs
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process', 
+            '--disable-gpu',
+            '--disable-blink-features=AutomationControlled', 
+            '--window-size=1920,1080'
+        ] 
     });
 }
 
 // --- SCRAPERS ---
 async function scrapeNSE() {
     console.log("Launching browser for NSE...");
-    let browser = null;
+    const browser = await getBrowser();
+    
     try {
-        browser = await getBrowser();
         const page = await browser.newPage();
         
-        // Stealth
         await page.evaluateOnNewDocument(() => {
             Object.defineProperty(navigator, 'webdriver', { get: () => false });
         });
@@ -94,7 +104,6 @@ async function scrapeNSE() {
             'Sec-Fetch-User': '?1'
         });
 
-        // Block resources
         await page.setRequestInterception(true);
         page.on('request', (req) => {
             if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
@@ -135,14 +144,12 @@ async function scrapeNSE() {
 
 async function scrapeGroww(targetSymbols) {
     console.log("Launching browser for Groww...");
-    let browser = null;
+    const browser = await getBrowser();
     const growwData = {};
 
     try {
-        browser = await getBrowser();
         const page = await browser.newPage();
         
-        // Stealth headers
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         
         await page.setRequestInterception(true);
@@ -153,7 +160,6 @@ async function scrapeGroww(targetSymbols) {
 
         await page.goto(GROWW_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
         
-        // BETTER SELECTOR: Find all links that look like stock links, ignore the class name
         const mostBoughtList = await page.evaluate(() => {
             const anchors = Array.from(document.querySelectorAll('a[href^="/stocks/"]'));
             return anchors.map(link => ({
@@ -165,14 +171,12 @@ async function scrapeGroww(targetSymbols) {
         for (const symbol of targetSymbols) {
             const normalizedTarget = normalize(symbol);
             
-            // Try to find exact match in Top List
             const match = mostBoughtList.find(g => {
                 const gName = normalize(g.name);
                 return gName.includes(normalizedTarget) || normalizedTarget.includes(gName);
             });
 
             if (match) {
-                // CASE 1: Found in Top List -> Scrape details
                 try {
                     await page.goto(`https://groww.in${match.link}`, { waitUntil: 'domcontentloaded' });
                     try { await page.waitForSelector('.shp76Row', { timeout: 3000 }); } catch (e) {}
@@ -190,18 +194,16 @@ async function scrapeGroww(targetSymbols) {
                     growwData[symbol] = { 
                         inMostBought: true, 
                         growwName: match.name, 
-                        growwLink: match.link, // Use the real link
+                        growwLink: match.link, 
                         shareholding: Object.keys(shareholding).length > 0 ? shareholding : "Not Found" 
                     };
                 } catch (e) {
-                    // If scraping fails, still provide the link!
                     growwData[symbol] = { inMostBought: true, growwName: match.name, growwLink: match.link, shareholding: "Error" };
                 }
             } else {
-                // CASE 2: Not in Top List -> USE SEARCH LINK (Fixes the "Not Working" issue)
                 growwData[symbol] = { 
                     inMostBought: false, 
-                    growwLink: `/search?q=${symbol}`, // <--- The Fix: Search URL
+                    growwLink: `/search?q=${symbol}`, 
                     shareholding: null 
                 };
             }
@@ -226,8 +228,9 @@ async function startDay() {
 
     const growwDetails = await scrapeGroww(top5);
 
+    // FIX: Using getISTTime() so the first entry has the correct Indian Time
     const initialSnapshot = {
-        time: "Market Open",
+        time: getISTTime(), 
         updates: top5.map(symbol => {
             const stock = allStocks.find(s => s.symbol === symbol);
             return {
@@ -240,7 +243,7 @@ async function startDay() {
     };
 
     saveData({ 
-        date: new Date().toDateString(), 
+        date: getISTDate(), 
         targetStocks: top5, 
         growwData: growwDetails, 
         history: [initialSnapshot] 
@@ -260,15 +263,17 @@ async function trackProgress() {
         return;
     }
 
-    console.log(`--- TRACKING ${new Date().toLocaleTimeString()} ---`);
+    // FIX: Log using IST Time
+    console.log(`--- TRACKING ${getISTTime()} ---`);
     const currentMarketData = await scrapeNSE();
     
     // Groww Update
     const updatedGrowwData = await scrapeGroww(data.targetStocks);
     if (Object.keys(updatedGrowwData).length > 0) data.growwData = updatedGrowwData;
 
-    // History Update
-    const snapshot = { time: new Date().toLocaleTimeString(), updates: [] };
+    // FIX: Saving snapshot with IST Time
+    const snapshot = { time: getISTTime(), updates: [] };
+    
     data.targetStocks.forEach(symbol => {
         const found = currentMarketData.find(s => s.symbol === symbol);
         let change = "0";
@@ -291,14 +296,19 @@ async function trackProgress() {
     console.log("✅ Data Saved.");
 }
 
-// --- SCHEDULER ---
+// --- SCHEDULER (Fixed for India Time) ---
+
+// 1. Start Day at 9:15 AM IST
 cron.schedule('15 9 * * *', () => {
     if(!isTrackingPaused) startDay();
-}); 
+}, { timezone: "Asia/Kolkata" }); 
+
+// 2. Track every 10 mins from 9:00 AM to 3:59 PM IST
 cron.schedule('*/10 9-15 * * *', () => { 
-    const h = new Date().getHours();
+    const h = getISTHour();
+    // Safety check: Only run between 9 AM and 3 PM India time
     if (h >= 9 && h <= 15) trackProgress();
-});
+}, { timezone: "Asia/Kolkata" });
 
 // --- APIs ---
 app.get('/api/data', (req, res) => res.json({ ...getStoredData(), isPaused: isTrackingPaused }));
