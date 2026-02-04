@@ -14,107 +14,90 @@ const DATA_FILE = path.join(__dirname, 'daily_data.json');
 const NSE_URL = 'https://www.nseindia.com/market-data/top-gainers-losers';
 const GROWW_URL = 'https://groww.in/stocks/most-bought-stocks-on-groww';
 
-let isTrackingPaused = true; 
+// --- SYSTEM STATE ---
+let isTrackingPaused = true;
+let isScanning = false; 
 
-// --- TIMEZONE HELPERS (Fixes the 9:40 AM issue) ---
+// --- TIMEZONE HELPERS (Forces IST) ---
 function getISTTime() {
     return new Date().toLocaleTimeString('en-IN', { 
-        timeZone: 'Asia/Kolkata', 
-        hour: '2-digit', 
-        minute: '2-digit', 
-        second: '2-digit', 
-        hour12: true 
+        timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true 
     });
 }
-
 function getISTDate() {
-    return new Date().toLocaleDateString('en-IN', { 
-        timeZone: 'Asia/Kolkata' 
-    });
+    return new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' });
 }
-
 function getISTHour() {
     const now = new Date().toLocaleString("en-US", {timeZone: "Asia/Kolkata"});
     return new Date(now).getHours();
 }
 
-// --- HELPER: Read/Write Data File ---
+// --- DATA MANAGEMENT ---
 function getStoredData() {
     if (!fs.existsSync(DATA_FILE)) return { targetStocks: [], growwData: {}, history: [] };
     const rawData = fs.readFileSync(DATA_FILE);
-    try {
-        return JSON.parse(rawData);
-    } catch (e) {
-        return { targetStocks: [], growwData: {}, history: [] };
-    }
+    try { return JSON.parse(rawData); } catch (e) { return { targetStocks: [], growwData: {}, history: [] }; }
 }
-
 function saveData(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
-
 function normalize(str) {
     if (!str) return "";
     return str.toUpperCase().replace(/LTD|LIMITED/g, '').replace(/[^A-Z0-9]/g, '');
 }
 
-// --- BROWSER LAUNCHER ---
+// --- STABLE BROWSER LAUNCHER ---
 async function getBrowser() {
+    const isWindows = process.platform === 'win32';
+    
+    // CONFIGURATION 1: WINDOWS (Local Development) - Minimal args for maximum stability
+    if (isWindows) {
+        return await puppeteer.launch({ 
+            headless: "new",
+            args: ['--no-sandbox', '--window-size=1920,1080']
+        });
+    }
+
+    // CONFIGURATION 2: LINUX (Render Deployment) - Aggressive memory saving
     return await puppeteer.launch({ 
         headless: "new", 
         timeout: 60000, 
         dumpio: false, 
         args: [
             '--no-sandbox', 
-            '--disable-setuid-sandbox',
+            '--disable-setuid-sandbox', 
             '--disable-dev-shm-usage',
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
             '--single-process', 
             '--disable-gpu',
-            '--disable-blink-features=AutomationControlled', 
             '--window-size=1920,1080'
         ] 
     });
 }
 
-// --- SCRAPERS ---
+// --- SCRAPING FUNCTIONS ---
 async function scrapeNSE() {
     console.log("Launching browser for NSE...");
-    const browser = await getBrowser();
-    
+    let browser = null;
     try {
+        browser = await getBrowser();
         const page = await browser.newPage();
         
-        await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, 'webdriver', { get: () => false });
-        });
+        // Basic Stealth
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        await page.setExtraHTTPHeaders({
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Referer': 'https://www.google.com/',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1'
-        });
-
+        
+        // Resource Blocking (Speed + Memory)
         await page.setRequestInterception(true);
         page.on('request', (req) => {
-            if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
-                req.abort();
-            } else {
-                req.continue();
-            }
+            if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) req.abort();
+            else req.continue();
         });
 
-        await page.goto(NSE_URL, { waitUntil: 'networkidle2', timeout: 90000 });
-        await page.waitForSelector('#topgainer-Table', { timeout: 20000 });
+        // Increased timeout for slow networks
+        await page.goto(NSE_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+        await page.waitForSelector('#topgainer-Table', { timeout: 30000 });
 
         const stocks = await page.evaluate(() => {
             const results = [];
@@ -136,7 +119,7 @@ async function scrapeNSE() {
         await browser.close();
         return stocks;
     } catch (error) {
-        console.error("NSE Scraping Error:", error.message);
+        console.error("NSE Error:", error.message);
         if(browser) await browser.close();
         return [];
     }
@@ -144,12 +127,11 @@ async function scrapeNSE() {
 
 async function scrapeGroww(targetSymbols) {
     console.log("Launching browser for Groww...");
-    const browser = await getBrowser();
+    let browser = null;
     const growwData = {};
-
     try {
+        browser = await getBrowser();
         const page = await browser.newPage();
-        
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         
         await page.setRequestInterception(true);
@@ -162,15 +144,11 @@ async function scrapeGroww(targetSymbols) {
         
         const mostBoughtList = await page.evaluate(() => {
             const anchors = Array.from(document.querySelectorAll('a[href^="/stocks/"]'));
-            return anchors.map(link => ({
-                name: link.innerText.trim(),
-                link: link.getAttribute('href')
-            }));
+            return anchors.map(link => ({ name: link.innerText.trim(), link: link.getAttribute('href') }));
         });
 
         for (const symbol of targetSymbols) {
             const normalizedTarget = normalize(symbol);
-            
             const match = mostBoughtList.find(g => {
                 const gName = normalize(g.name);
                 return gName.includes(normalizedTarget) || normalizedTarget.includes(gName);
@@ -179,7 +157,7 @@ async function scrapeGroww(targetSymbols) {
             if (match) {
                 try {
                     await page.goto(`https://groww.in${match.link}`, { waitUntil: 'domcontentloaded' });
-                    try { await page.waitForSelector('.shp76Row', { timeout: 3000 }); } catch (e) {}
+                    try { await page.waitForSelector('.shp76Row', { timeout: 5000 }); } catch (e) {}
                     
                     const shareholding = await page.evaluate(() => {
                         const pattern = {};
@@ -217,147 +195,138 @@ async function scrapeGroww(targetSymbols) {
     }
 }
 
-// --- MAIN LOGIC ---
+// --- WORKFLOW LOGIC ---
 async function startDay() {
-    console.log("--- INITIALIZING DAY ---");
-    const allStocks = await scrapeNSE();
-    allStocks.sort((a, b) => b.volume - a.volume);
-    const top5 = allStocks.slice(0, 5).map(s => s.symbol);
+    if (isScanning) return; 
+    isScanning = true;
+    
+    try {
+        console.log("--- INITIALIZING DAY ---");
+        const allStocks = await scrapeNSE();
+        allStocks.sort((a, b) => b.volume - a.volume);
+        const top5 = allStocks.slice(0, 5).map(s => s.symbol);
 
-    if (top5.length === 0) { console.log("❌ No data from NSE."); return; }
+        if (top5.length === 0) { 
+            console.log("❌ No data from NSE."); 
+            return; 
+        }
 
-    const growwDetails = await scrapeGroww(top5);
+        const growwDetails = await scrapeGroww(top5);
+        const initialSnapshot = {
+            time: getISTTime(), 
+            updates: top5.map(symbol => {
+                const stock = allStocks.find(s => s.symbol === symbol);
+                return { symbol, volume: stock ? stock.volume : 0, status: "Active", change: "Base Vol" };
+            })
+        };
 
-    // FIX: Using getISTTime() so the first entry has the correct Indian Time
-    const initialSnapshot = {
-        time: getISTTime(), 
-        updates: top5.map(symbol => {
-            const stock = allStocks.find(s => s.symbol === symbol);
-            return {
-                symbol: symbol,
-                volume: stock ? stock.volume : 0,
-                status: "Active",
-                change: "Base Vol"
-            };
-        })
-    };
-
-    saveData({ 
-        date: getISTDate(), 
-        targetStocks: top5, 
-        growwData: growwDetails, 
-        history: [initialSnapshot] 
-    });
-    console.log("✅ Day Initialized.");
+        saveData({ date: getISTDate(), targetStocks: top5, growwData: growwDetails, history: [initialSnapshot] });
+        console.log("✅ Day Initialized.");
+    } catch (e) {
+        console.error("Critical Error in startDay:", e);
+    } finally {
+        isScanning = false; // RELEASE LOCK
+    }
 }
 
 async function trackProgress() {
-    if (isTrackingPaused) {
-        console.log("⏸️ Tracking is PAUSED.");
-        return;
-    }
-
-    let data = getStoredData();
-    if (!data.targetStocks || data.targetStocks.length === 0) {
-        if (!isTrackingPaused) await startDay();
-        return;
-    }
-
-    // FIX: Log using IST Time
-    console.log(`--- TRACKING ${getISTTime()} ---`);
-    const currentMarketData = await scrapeNSE();
+    if (isTrackingPaused) { console.log("⏸️ Paused."); return; }
+    if (isScanning) { console.log("⚠️ Scan already in progress."); return; }
     
-    // Groww Update
-    const updatedGrowwData = await scrapeGroww(data.targetStocks);
-    if (Object.keys(updatedGrowwData).length > 0) data.growwData = updatedGrowwData;
-
-    // FIX: Saving snapshot with IST Time
-    const snapshot = { time: getISTTime(), updates: [] };
+    isScanning = true; 
     
-    data.targetStocks.forEach(symbol => {
-        const found = currentMarketData.find(s => s.symbol === symbol);
-        let change = "0";
-        if (found) {
-            if (data.history.length > 0) {
-                const last = data.history[data.history.length - 1].updates.find(u => u.symbol === symbol);
-                if (last && last.volume !== "N/A") {
-                    const diff = found.volume - last.volume;
-                    change = diff > 0 ? `+${diff}` : `${diff}`;
-                }
-            }
-            snapshot.updates.push({ symbol, volume: found.volume, status: "Active", change });
-        } else {
-            snapshot.updates.push({ symbol, volume: "N/A", status: "Disappeared", change: "0" });
+    try {
+        let data = getStoredData();
+        
+        if (!data.targetStocks || data.targetStocks.length === 0) {
+            isScanning = false; // Unlock before starting day
+            if (!isTrackingPaused) await startDay();
+            return;
         }
-    });
 
-    data.history.push(snapshot);
-    saveData(data);
-    console.log("✅ Data Saved.");
+        console.log(`--- TRACKING ${getISTTime()} ---`);
+        const currentMarketData = await scrapeNSE();
+        const updatedGrowwData = await scrapeGroww(data.targetStocks);
+        if (Object.keys(updatedGrowwData).length > 0) data.growwData = updatedGrowwData;
+
+        const snapshot = { time: getISTTime(), updates: [] };
+        data.targetStocks.forEach(symbol => {
+            const found = currentMarketData.find(s => s.symbol === symbol);
+            let change = "0";
+            if (found) {
+                if (data.history.length > 0) {
+                    const last = data.history[data.history.length - 1].updates.find(u => u.symbol === symbol);
+                    if (last && last.volume !== "N/A") {
+                        const diff = found.volume - last.volume;
+                        change = diff > 0 ? `+${diff}` : `${diff}`;
+                    }
+                }
+                snapshot.updates.push({ symbol, volume: found.volume, status: "Active", change });
+            } else {
+                snapshot.updates.push({ symbol, volume: "N/A", status: "Disappeared", change: "0" });
+            }
+        });
+
+        data.history.push(snapshot);
+        saveData(data);
+        console.log("✅ Data Saved.");
+    } catch (e) {
+        console.error("Critical Error in trackProgress:", e);
+    } finally {
+        isScanning = false; // RELEASE LOCK
+    }
 }
 
-// --- SCHEDULER (Fixed for India Time) ---
-
-// 1. Start Day at 9:15 AM IST
-cron.schedule('15 9 * * *', () => {
-    if(!isTrackingPaused) startDay();
-}, { timezone: "Asia/Kolkata" }); 
-
-// 2. Track every 10 mins from 9:00 AM to 3:59 PM IST
+// --- SCHEDULER (IST) ---
+cron.schedule('15 9 * * *', () => { if(!isTrackingPaused) startDay(); }, { timezone: "Asia/Kolkata" }); 
 cron.schedule('*/10 9-15 * * *', () => { 
     const h = getISTHour();
-    // Safety check: Only run between 9 AM and 3 PM India time
     if (h >= 9 && h <= 15) trackProgress();
 }, { timezone: "Asia/Kolkata" });
 
 // --- APIs ---
-app.get('/api/data', (req, res) => res.json({ ...getStoredData(), isPaused: isTrackingPaused }));
+app.get('/api/data', (req, res) => res.json({ ...getStoredData(), isPaused: isTrackingPaused, isScanning })); 
 
 app.get('/api/control/pause', (req, res) => {
     isTrackingPaused = true;
-    console.log("⏸️ SYSTEM PAUSED");
     res.json({ message: "Paused", isPaused: true });
 });
 
 app.get('/api/control/resume', (req, res) => {
     isTrackingPaused = false;
-    console.log("▶️ SYSTEM RESUMED");
     const data = getStoredData();
-    if (!data.targetStocks || data.targetStocks.length === 0) {
-        startDay();
-    } else {
-        trackProgress();
-    }
+    if (!data.targetStocks || data.targetStocks.length === 0) startDay();
+    else trackProgress();
     res.json({ message: "Resumed", isPaused: false });
 });
 
 app.get('/api/control/force-fetch', async (req, res) => {
-    console.log("⚡ FORCE FETCH");
+    if (isScanning) return res.status(429).json({ message: "⚠️ Scan already running!" });
+    
     const wasPaused = isTrackingPaused;
     isTrackingPaused = false; 
-    await trackProgress();
-    isTrackingPaused = wasPaused; 
-    res.json({ message: "Fetch Complete" });
+    
+    // Run async to return response immediately
+    trackProgress().finally(() => {
+        isTrackingPaused = wasPaused; 
+    });
+
+    res.json({ message: "Fetch Triggered" });
 });
 
 app.get('/api/control/restart-day', async (req, res) => {
-    console.log("🔄 RESTART DAY");
-    await startDay();
-    res.json({ message: "Day Reset Complete" });
+    if (isScanning) return res.status(429).json({ message: "⚠️ Scan already running!" });
+    startDay(); 
+    res.json({ message: "Day Reset Triggered" });
 });
 
-// --- SERVE FRONTEND ---
 app.use(express.static(path.join(__dirname, 'client/build')));
 app.get(/(.*)/, (req, res) => {
-    if (req.path.startsWith('/api') || req.path.startsWith('/data')) {
-        return res.status(404).send("API endpoint not found");
-    }
+    if (req.path.startsWith('/api') || req.path.startsWith('/data')) return res.status(404).send("API endpoint not found");
     res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
 });
 
 app.listen(PORT, async () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    if (!fs.existsSync(DATA_FILE)) {
-        console.log("ℹ️ No data file. Waiting for user to Start Tracking.");
-    }
+    if (!fs.existsSync(DATA_FILE)) console.log("ℹ️ No data file.");
 });
