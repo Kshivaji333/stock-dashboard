@@ -142,6 +142,7 @@ async function scrapeGroww(targetSymbols) {
         browser = await getBrowser();
         const page = await browser.newPage();
         
+        // Stealth headers
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         
         await page.setRequestInterception(true);
@@ -152,8 +153,10 @@ async function scrapeGroww(targetSymbols) {
 
         await page.goto(GROWW_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
         
+        // BETTER SELECTOR: Find all links that look like stock links, ignore the class name
         const mostBoughtList = await page.evaluate(() => {
-            return Array.from(document.querySelectorAll('a.seeMore_companyNameLink__lvbvi')).map(link => ({
+            const anchors = Array.from(document.querySelectorAll('a[href^="/stocks/"]'));
+            return anchors.map(link => ({
                 name: link.innerText.trim(),
                 link: link.getAttribute('href')
             }));
@@ -161,12 +164,15 @@ async function scrapeGroww(targetSymbols) {
 
         for (const symbol of targetSymbols) {
             const normalizedTarget = normalize(symbol);
+            
+            // Try to find exact match in Top List
             const match = mostBoughtList.find(g => {
                 const gName = normalize(g.name);
                 return gName.includes(normalizedTarget) || normalizedTarget.includes(gName);
             });
 
             if (match) {
+                // CASE 1: Found in Top List -> Scrape details
                 try {
                     await page.goto(`https://groww.in${match.link}`, { waitUntil: 'domcontentloaded' });
                     try { await page.waitForSelector('.shp76Row', { timeout: 3000 }); } catch (e) {}
@@ -184,14 +190,20 @@ async function scrapeGroww(targetSymbols) {
                     growwData[symbol] = { 
                         inMostBought: true, 
                         growwName: match.name, 
-                        growwLink: match.link, 
+                        growwLink: match.link, // Use the real link
                         shareholding: Object.keys(shareholding).length > 0 ? shareholding : "Not Found" 
                     };
                 } catch (e) {
+                    // If scraping fails, still provide the link!
                     growwData[symbol] = { inMostBought: true, growwName: match.name, growwLink: match.link, shareholding: "Error" };
                 }
             } else {
-                growwData[symbol] = { inMostBought: false, shareholding: null };
+                // CASE 2: Not in Top List -> USE SEARCH LINK (Fixes the "Not Working" issue)
+                growwData[symbol] = { 
+                    inMostBought: false, 
+                    growwLink: `/search?q=${symbol}`, // <--- The Fix: Search URL
+                    shareholding: null 
+                };
             }
         }
         await browser.close();

@@ -9,7 +9,6 @@ function App() {
   const [actionStatus, setActionStatus] = useState("");
   const [timeLeft, setTimeLeft] = useState("Calculating...");
 
-  // --- 1. DATA FETCHING ---
   const fetchData = async () => {
     try {
       const response = await axios.get('/api/data');
@@ -27,7 +26,7 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // --- 2. TIMER LOGIC (Syncs with 10-min backend schedule) ---
+  // Timer Logic
   useEffect(() => {
     const timerInterval = setInterval(() => {
       if (isPaused) {
@@ -37,22 +36,15 @@ function App() {
       const now = new Date();
       const minutes = now.getMinutes();
       const seconds = now.getSeconds();
-
-      // Backend runs at 00, 10, 20, 30...
-      // Calculate minutes remaining until next 10-minute mark
       const minutesPastTen = minutes % 10;
       const minutesRemaining = 9 - minutesPastTen;
       const secondsRemaining = 59 - seconds;
-
       const formattedTime = `${minutesRemaining}:${secondsRemaining < 10 ? '0' : ''}${secondsRemaining}`;
       setTimeLeft(formattedTime);
     }, 1000);
-
     return () => clearInterval(timerInterval);
   }, [isPaused]);
 
-
-  // --- 3. CONTROLS ---
   const handleControl = async (endpoint, label) => {
     setActionStatus(`Executing: ${label}...`);
     try {
@@ -65,15 +57,16 @@ function App() {
     }
   };
 
-  // --- 4. CLICK HANDLER FOR CARDS ---
-  const handleCardClick = (growwLink) => {
+  // --- FIXED CLICK HANDLER ---
+  const handleCardClick = (growwLink, symbol) => {
     if (growwLink) {
+        // If it's a search link or a direct link, prepend domain
         window.open(`https://groww.in${growwLink}`, '_blank');
     } else {
-        alert("Groww link not found for this stock.");
+        // Absolute fallback if backend fails completely
+        window.open(`https://groww.in/search?q=${symbol}`, '_blank');
     }
   };
-
 
   if (loading) return <div className="loading">Connecting to Server...</div>;
   
@@ -99,7 +92,6 @@ function App() {
       <header className="header">
         <h1>🚀 10m Volume & Groww Tracker</h1>
         
-        {/* CONTROL PANEL */}
         <div className="control-panel">
             <button 
                 className={`btn ${isPaused ? 'btn-resume' : 'btn-pause'}`} 
@@ -107,11 +99,9 @@ function App() {
             >
                 {isPaused ? "▶ RESUME TRACKING" : "⏸ PAUSE TRACKING"}
             </button>
-            
             <button className="btn btn-fetch" onClick={() => handleControl('force-fetch', "Force Fetch")}>
                 ⚡ Fetch Now
             </button>
-
             <button className="btn btn-restart" onClick={() => {
                 if(window.confirm("Are you sure? This will wipe today's history.")) 
                     handleControl('restart-day', "Restarting Day");
@@ -120,10 +110,8 @@ function App() {
             </button>
         </div>
         
-        {/* TIMER AND STATUS */}
         <div className="system-status">
             {actionStatus && <span className="action-msg">{actionStatus}</span>}
-            
             <div className="status-row">
                 <span className="meta-info">Status: {isPaused ? <span className="red">PAUSED</span> : <span className="green">RUNNING</span>}</span>
                 <span className="meta-info timer-box">
@@ -133,11 +121,10 @@ function App() {
         </div>
       </header>
 
-      {/* CARDS */}
       <div className="cards-container">
         {data.targetStocks.map((symbol) => {
           const growwInfo = data.growwData ? data.growwData[symbol] : null;
-          const growwLink = growwInfo?.growwLink; // Extracted Link
+          const growwLink = growwInfo?.growwLink; 
           
           const latestUpdate = data.history.length > 0 
             ? data.history[data.history.length - 1].updates.find(u => u.symbol === symbol)
@@ -147,10 +134,10 @@ function App() {
 
           return (
             <div 
-                className={`stock-card ${isDisappeared ? 'card-disappeared' : ''} ${growwLink ? 'clickable-card' : ''}`} 
+                className={`stock-card ${isDisappeared ? 'card-disappeared' : ''} clickable-card`} 
                 key={symbol}
-                onClick={() => handleCardClick(growwLink)}
-                title={growwLink ? "Click to open in Groww" : "No link available"}
+                onClick={() => handleCardClick(growwLink, symbol)}
+                title="Click to open in Groww"
             >
               <div className="card-header">
                 <h2>{symbol}</h2>
@@ -196,7 +183,6 @@ function App() {
         })}
       </div>
 
-      {/* TABLE */}
       <div className="history-section">
         <h3>📊 History Log</h3>
         <div className="table-wrapper">
