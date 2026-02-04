@@ -9,7 +9,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 5000; // Use Render's port
+const PORT = process.env.PORT || 5000;
 const DATA_FILE = path.join(__dirname, 'daily_data.json');
 const NSE_URL = 'https://www.nseindia.com/market-data/top-gainers-losers';
 const GROWW_URL = 'https://groww.in/stocks/most-bought-stocks-on-groww';
@@ -36,23 +36,24 @@ function normalize(str) {
     return str.toUpperCase().replace(/LTD|LIMITED/g, '').replace(/[^A-Z0-9]/g, '');
 }
 
-// --- OPTIMIZED BROWSER LAUNCHER (FIXED FOR RENDER) ---
+// --- OPTIMIZED BROWSER LAUNCHER ---
 async function getBrowser() {
     return await puppeteer.launch({ 
         headless: "new", 
-        // INCREASE TIMEOUT: Give Render 2 minutes to start Chrome (vs default 30s)
-        timeout: 120000, 
-        // KEY FIX: Pipe logs to stdout. This often fixes the "WS Endpoint" timeout on Render
-        dumpio: true,
+        timeout: 60000, // 60s timeout usually sufficient if args are correct
+        dumpio: false, // Turn off dumpio to reduce log noise unless debugging
         args: [
             '--no-sandbox', 
             '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage', // Vital for Render's memory limits
+            '--disable-dev-shm-usage',
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
             '--single-process', 
-            '--disable-gpu'
+            '--disable-gpu',
+            // STEALTH ARGS for NSE
+            '--disable-blink-features=AutomationControlled', 
+            '--window-size=1920,1080'
         ] 
     });
 }
@@ -65,18 +66,43 @@ async function scrapeNSE() {
     try {
         const page = await browser.newPage();
         
-        // Block images/fonts to save memory
+        // 1. STEALTH: Hide Puppeteer fingerprint
+        await page.evaluateOnNewDocument(() => {
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+        });
+
+        // 2. STEALTH: Set Human User Agent
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+        // 3. STEALTH: Set Headers so NSE thinks we are a real browser
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.google.com/',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1'
+        });
+
+        // Block images/fonts/media
         await page.setRequestInterception(true);
         page.on('request', (req) => {
-            if (['image', 'stylesheet', 'font'].includes(req.resourceType())) {
+            if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
                 req.abort();
             } else {
                 req.continue();
             }
         });
 
-        await page.goto(NSE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await page.waitForSelector('#topgainer-Table', { timeout: 15000 });
+        // 4. Load Page (Wait for network idle to ensure WAF checks pass)
+        await page.goto(NSE_URL, { waitUntil: 'networkidle2', timeout: 90000 });
+        
+        // 5. Wait for Table
+        await page.waitForSelector('#topgainer-Table', { timeout: 20000 });
 
         const stocks = await page.evaluate(() => {
             const results = [];
@@ -112,7 +138,9 @@ async function scrapeGroww(targetSymbols) {
     try {
         const page = await browser.newPage();
         
-        // Block resources
+        // Stealth basics for Groww too
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        
         await page.setRequestInterception(true);
         page.on('request', (req) => {
             if (['image', 'stylesheet', 'font'].includes(req.resourceType())) req.abort();
@@ -128,7 +156,6 @@ async function scrapeGroww(targetSymbols) {
             }));
         });
 
-        // OPTIMIZATION: Reuse the SAME page/tab instead of opening new ones
         for (const symbol of targetSymbols) {
             const normalizedTarget = normalize(symbol);
             const match = mostBoughtList.find(g => {
@@ -139,8 +166,6 @@ async function scrapeGroww(targetSymbols) {
             if (match) {
                 try {
                     await page.goto(`https://groww.in${match.link}`, { waitUntil: 'domcontentloaded' });
-                    
-                    // Fast wait
                     try { await page.waitForSelector('.shp76Row', { timeout: 3000 }); } catch (e) {}
                     
                     const shareholding = await page.evaluate(() => {
