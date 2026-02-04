@@ -7,7 +7,9 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [isPaused, setIsPaused] = useState(false);
   const [actionStatus, setActionStatus] = useState("");
+  const [timeLeft, setTimeLeft] = useState("Calculating...");
 
+  // --- 1. DATA FETCHING ---
   const fetchData = async () => {
     try {
       const response = await axios.get('/api/data');
@@ -25,6 +27,32 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
+  // --- 2. TIMER LOGIC (Syncs with 10-min backend schedule) ---
+  useEffect(() => {
+    const timerInterval = setInterval(() => {
+      if (isPaused) {
+        setTimeLeft("Paused");
+        return;
+      }
+      const now = new Date();
+      const minutes = now.getMinutes();
+      const seconds = now.getSeconds();
+
+      // Backend runs at 00, 10, 20, 30...
+      // Calculate minutes remaining until next 10-minute mark
+      const minutesPastTen = minutes % 10;
+      const minutesRemaining = 9 - minutesPastTen;
+      const secondsRemaining = 59 - seconds;
+
+      const formattedTime = `${minutesRemaining}:${secondsRemaining < 10 ? '0' : ''}${secondsRemaining}`;
+      setTimeLeft(formattedTime);
+    }, 1000);
+
+    return () => clearInterval(timerInterval);
+  }, [isPaused]);
+
+
+  // --- 3. CONTROLS ---
   const handleControl = async (endpoint, label) => {
     setActionStatus(`Executing: ${label}...`);
     try {
@@ -37,9 +65,18 @@ function App() {
     }
   };
 
+  // --- 4. CLICK HANDLER FOR CARDS ---
+  const handleCardClick = (growwLink) => {
+    if (growwLink) {
+        window.open(`https://groww.in${growwLink}`, '_blank');
+    } else {
+        alert("Groww link not found for this stock.");
+    }
+  };
+
+
   if (loading) return <div className="loading">Connecting to Server...</div>;
   
-  // Handling case where server is running but no data exists yet
   if (!data || !data.targetStocks || data.targetStocks.length === 0) {
       return (
         <div className="dashboard">
@@ -83,10 +120,16 @@ function App() {
             </button>
         </div>
         
-        {/* STATUS MESSAGE (Timer Removed) */}
+        {/* TIMER AND STATUS */}
         <div className="system-status">
             {actionStatus && <span className="action-msg">{actionStatus}</span>}
-            <span className="meta-info">Status: {isPaused ? <span className="red">PAUSED</span> : <span className="green">RUNNING</span>}</span>
+            
+            <div className="status-row">
+                <span className="meta-info">Status: {isPaused ? <span className="red">PAUSED</span> : <span className="green">RUNNING</span>}</span>
+                <span className="meta-info timer-box">
+                    Fetching in: <span className="timer-val">{timeLeft}</span>
+                </span>
+            </div>
         </div>
       </header>
 
@@ -94,8 +137,8 @@ function App() {
       <div className="cards-container">
         {data.targetStocks.map((symbol) => {
           const growwInfo = data.growwData ? data.growwData[symbol] : null;
+          const growwLink = growwInfo?.growwLink; // Extracted Link
           
-          // Get the very last update
           const latestUpdate = data.history.length > 0 
             ? data.history[data.history.length - 1].updates.find(u => u.symbol === symbol)
             : null;
@@ -103,7 +146,12 @@ function App() {
           const isDisappeared = latestUpdate?.status === "Disappeared";
 
           return (
-            <div className={`stock-card ${isDisappeared ? 'card-disappeared' : ''}`} key={symbol}>
+            <div 
+                className={`stock-card ${isDisappeared ? 'card-disappeared' : ''} ${growwLink ? 'clickable-card' : ''}`} 
+                key={symbol}
+                onClick={() => handleCardClick(growwLink)}
+                title={growwLink ? "Click to open in Groww" : "No link available"}
+            >
               <div className="card-header">
                 <h2>{symbol}</h2>
                 <span className={`status-badge ${isDisappeared ? 'status-red' : 'status-green'}`}>
@@ -128,7 +176,6 @@ function App() {
                   {growwInfo?.inMostBought ? "🔥 Groww Top Bought" : "Not in Top List"}
                 </div>
                 
-                {/* Shareholding Rendering Logic */}
                 {growwInfo?.shareholding && typeof growwInfo.shareholding === 'object' ? (
                   <div className="shareholding">
                     <strong>Shareholding:</strong>

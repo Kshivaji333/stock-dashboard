@@ -36,45 +36,51 @@ function normalize(str) {
     return str.toUpperCase().replace(/LTD|LIMITED/g, '').replace(/[^A-Z0-9]/g, '');
 }
 
-// --- OPTIMIZED BROWSER LAUNCHER ---
+// --- SMART BROWSER LAUNCHER (Auto-detects Windows vs Linux) ---
 async function getBrowser() {
-    return await puppeteer.launch({ 
-        headless: "new", 
-        timeout: 60000, // 60s timeout usually sufficient if args are correct
-        dumpio: false, // Turn off dumpio to reduce log noise unless debugging
-        args: [
-            '--no-sandbox', 
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
+    const isWindows = process.platform === 'win32';
+    
+    // Base arguments that work everywhere
+    let launchArgs = [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled', 
+        '--window-size=1920,1080'
+    ];
+
+    // Add aggressive memory saving ONLY if NOT on Windows (i.e., on Render)
+    if (!isWindows) {
+        launchArgs.push(
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
-            '--single-process', 
-            '--disable-gpu',
-            // STEALTH ARGS for NSE
-            '--disable-blink-features=AutomationControlled', 
-            '--window-size=1920,1080'
-        ] 
+            '--single-process', // This was crashing Windows
+            '--disable-gpu'
+        );
+    }
+
+    return await puppeteer.launch({ 
+        headless: "new", 
+        timeout: 60000, 
+        dumpio: false, 
+        args: launchArgs
     });
 }
 
 // --- SCRAPERS ---
 async function scrapeNSE() {
     console.log("Launching browser for NSE...");
-    const browser = await getBrowser();
-    
+    let browser = null;
     try {
+        browser = await getBrowser();
         const page = await browser.newPage();
         
-        // 1. STEALTH: Hide Puppeteer fingerprint
+        // Stealth
         await page.evaluateOnNewDocument(() => {
             Object.defineProperty(navigator, 'webdriver', { get: () => false });
         });
-
-        // 2. STEALTH: Set Human User Agent
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-
-        // 3. STEALTH: Set Headers so NSE thinks we are a real browser
         await page.setExtraHTTPHeaders({
             'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
@@ -88,7 +94,7 @@ async function scrapeNSE() {
             'Sec-Fetch-User': '?1'
         });
 
-        // Block images/fonts/media
+        // Block resources
         await page.setRequestInterception(true);
         page.on('request', (req) => {
             if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
@@ -98,10 +104,7 @@ async function scrapeNSE() {
             }
         });
 
-        // 4. Load Page (Wait for network idle to ensure WAF checks pass)
         await page.goto(NSE_URL, { waitUntil: 'networkidle2', timeout: 90000 });
-        
-        // 5. Wait for Table
         await page.waitForSelector('#topgainer-Table', { timeout: 20000 });
 
         const stocks = await page.evaluate(() => {
@@ -132,13 +135,13 @@ async function scrapeNSE() {
 
 async function scrapeGroww(targetSymbols) {
     console.log("Launching browser for Groww...");
-    const browser = await getBrowser();
+    let browser = null;
     const growwData = {};
 
     try {
+        browser = await getBrowser();
         const page = await browser.newPage();
         
-        // Stealth basics for Groww too
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         
         await page.setRequestInterception(true);
@@ -177,9 +180,15 @@ async function scrapeGroww(targetSymbols) {
                         });
                         return pattern;
                     });
-                    growwData[symbol] = { inMostBought: true, growwName: match.name, shareholding: Object.keys(shareholding).length > 0 ? shareholding : "Not Found" };
+                    
+                    growwData[symbol] = { 
+                        inMostBought: true, 
+                        growwName: match.name, 
+                        growwLink: match.link, 
+                        shareholding: Object.keys(shareholding).length > 0 ? shareholding : "Not Found" 
+                    };
                 } catch (e) {
-                    growwData[symbol] = { inMostBought: true, growwName: match.name, shareholding: "Error" };
+                    growwData[symbol] = { inMostBought: true, growwName: match.name, growwLink: match.link, shareholding: "Error" };
                 }
             } else {
                 growwData[symbol] = { inMostBought: false, shareholding: null };
