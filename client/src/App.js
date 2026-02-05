@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import './App.css';
 
@@ -12,6 +12,11 @@ function App() {
   
   // Controls button lock
   const [isProcessing, setIsProcessing] = useState(false);
+  
+  // Refs for cleanup
+  const fetchTimeoutRef = useRef(null);
+  const pollIntervalRef = useRef(null);
+  const timerIntervalRef = useRef(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -40,14 +45,23 @@ function App() {
   // Poll every 3 seconds for faster UI updates
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 3000);
-    return () => clearInterval(interval);
+    pollIntervalRef.current = setInterval(fetchData, 3000);
+    
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+      }
+    };
   }, [fetchData]); 
 
   // Timer Logic
   useEffect(() => {
-    const timerInterval = setInterval(() => {
-      if (isPaused) { setTimeLeft("Paused"); return; }
+    timerIntervalRef.current = setInterval(() => {
+      if (isPaused) { 
+        setTimeLeft("Paused"); 
+        return; 
+      }
+      
       const now = new Date();
       const minutes = now.getMinutes();
       const seconds = now.getSeconds();
@@ -56,8 +70,28 @@ function App() {
       const secondsRemaining = 59 - seconds;
       setTimeLeft(`${minutesRemaining}:${secondsRemaining < 10 ? '0' : ''}${secondsRemaining}`);
     }, 1000);
-    return () => clearInterval(timerInterval);
+    
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+      }
+    };
   }, [isPaused]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (fetchTimeoutRef.current) {
+        clearTimeout(fetchTimeoutRef.current);
+      }
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+      }
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+      }
+    };
+  }, []);
 
   const handleControl = async (endpoint, label) => {
     if (isProcessing) return; // Prevent double click
@@ -68,8 +102,18 @@ function App() {
     try {
       await axios.get(`/api/control/${endpoint}`);
       setActionStatus(`Triggered: ${label}`);
-      setTimeout(() => fetchData(), 500); 
+      
+      // Clear any existing timeout before setting new one
+      if (fetchTimeoutRef.current) {
+        clearTimeout(fetchTimeoutRef.current);
+      }
+      
+      fetchTimeoutRef.current = setTimeout(() => {
+        fetchData();
+        fetchTimeoutRef.current = null;
+      }, 500);
     } catch (error) {
+      console.error(`Error executing ${label}:`, error);
       setActionStatus(`Error: ${label}`);
       setIsProcessing(false); // Unlock on error
     }
@@ -81,26 +125,42 @@ function App() {
     if (newWindow) newWindow.opener = null;
   };
 
-  if (loading) return <div className="loading">Connecting to Server...</div>;
-  if (connectionError && !data) return <div className="loading">Connection lost. Retrying...</div>;
+  if (loading) {
+    return <div className="loading">Connecting to Server...</div>;
+  }
+  
+  if (connectionError && !data) {
+    return (
+      <div className="loading">
+        <div>Connection lost. Retrying...</div>
+        <div style={{ fontSize: '0.9rem', marginTop: '10px', color: '#8b949e' }}>
+          Please check if the server is running
+        </div>
+      </div>
+    );
+  }
   
   if (!data || !data.targetStocks || data.targetStocks.length === 0) {
-      return (
-        <div className="dashboard">
-             <header className="header"><h1>Stock Tracker</h1></header>
-             <div className="empty-state">
-                <h2>Ready to Start</h2>
-                <p>{data?.isStale ? "New trading day detected. Initialize tracking to refresh data." : "System is paused. Initialize tracking below."}</p>
-                <button 
-                    className="btn btn-resume" 
-                    disabled={isProcessing}
-                    onClick={() => handleControl('resume', "Starting System")}
-                >
-                    {isProcessing ? "STARTING..." : "START TRACKING"}
-                </button>
-             </div>
+    return (
+      <div className="dashboard">
+        <header className="header"><h1>Stock Tracker</h1></header>
+        <div className="empty-state">
+          <h2>Ready to Start</h2>
+          <p>
+            {data?.isStale 
+              ? "New trading day detected. Initialize tracking to refresh data." 
+              : "System is paused. Initialize tracking below."}
+          </p>
+          <button 
+            className="btn btn-resume" 
+            disabled={isProcessing}
+            onClick={() => handleControl('resume', "Starting System")}
+          >
+            {isProcessing ? "STARTING..." : "START TRACKING"}
+          </button>
         </div>
-      )
+      </div>
+    );
   }
 
   return (
@@ -109,40 +169,45 @@ function App() {
         <h1>10m Volume & Groww Tracker</h1>
         
         <div className="control-panel">
-            <button 
-                className={`btn ${isPaused ? 'btn-resume' : 'btn-pause'}`} 
-                disabled={isProcessing}
-                onClick={() => handleControl(isPaused ? 'resume' : 'pause', isPaused ? "Resuming" : "Pausing")}
-            >
-                {isProcessing ? "PLEASE WAIT..." : (isPaused ? "RESUME TRACKING" : "PAUSE TRACKING")}
-            </button>
-            
-            <button 
-                className="btn btn-fetch" 
-                disabled={isProcessing}
-                onClick={() => handleControl('force-fetch', "Force Fetch")}
-            >
-                {isProcessing ? "FETCHING..." : "FETCH NOW"}
-            </button>
+          <button 
+            className={`btn ${isPaused ? 'btn-resume' : 'btn-pause'}`} 
+            disabled={isProcessing}
+            onClick={() => handleControl(isPaused ? 'resume' : 'pause', isPaused ? "Resuming" : "Pausing")}
+          >
+            {isProcessing ? "PLEASE WAIT..." : (isPaused ? "RESUME TRACKING" : "PAUSE TRACKING")}
+          </button>
+          
+          <button 
+            className="btn btn-fetch" 
+            disabled={isProcessing}
+            onClick={() => handleControl('force-fetch', "Force Fetch")}
+          >
+            {isProcessing ? "FETCHING..." : "FETCH NOW"}
+          </button>
 
-            <button 
-                className="btn btn-restart" 
-                disabled={isProcessing}
-                onClick={() => {
-                    if(window.confirm("Are you sure? This will wipe history.")) 
-                        handleControl('restart-day', "Restarting Day");
-                }}
-            >
-                RESTART DAY
-            </button>
+          <button 
+            className="btn btn-restart" 
+            disabled={isProcessing}
+            onClick={() => {
+              if (window.confirm("Are you sure? This will wipe history and restart the day.")) {
+                handleControl('restart-day', "Restarting Day");
+              }
+            }}
+          >
+            RESTART DAY
+          </button>
         </div>
         
         <div className="system-status">
-            {actionStatus && <span className="action-msg">{actionStatus}</span>}
-            <div className="status-row">
-                <span className="meta-info">Status: {isPaused ? <span className="red">PAUSED</span> : <span className="green">RUNNING</span>}</span>
-                <span className="meta-info timer-box">Fetch in: <span className="timer-val">{timeLeft}</span></span>
-            </div>
+          {actionStatus && <span className="action-msg">{actionStatus}</span>}
+          <div className="status-row">
+            <span className="meta-info">
+              Status: {isPaused ? <span className="red">PAUSED</span> : <span className="green">RUNNING</span>}
+            </span>
+            <span className="meta-info timer-box">
+              Fetch in: <span className="timer-val">{timeLeft}</span>
+            </span>
+          </div>
         </div>
       </header>
 
@@ -150,15 +215,17 @@ function App() {
         {data.targetStocks.map((symbol) => {
           const growwInfo = data.growwData ? data.growwData[symbol] : null;
           const growwLink = growwInfo?.growwLink; 
-          const latestUpdate = data.history.length > 0 ? data.history[data.history.length - 1].updates.find(u => u.symbol === symbol) : null;
+          const latestUpdate = data.history.length > 0 
+            ? data.history[data.history.length - 1].updates.find(u => u.symbol === symbol) 
+            : null;
           const isDisappeared = latestUpdate?.status === "Disappeared";
 
           return (
             <div 
-                className={`stock-card ${isDisappeared ? 'card-disappeared' : ''} clickable-card`} 
-                key={symbol}
-                onClick={() => handleCardClick(growwLink, symbol)}
-                title="Click to open in Groww"
+              className={`stock-card ${isDisappeared ? 'card-disappeared' : ''} clickable-card`} 
+              key={symbol}
+              onClick={() => handleCardClick(growwLink, symbol)}
+              title="Click to open in Groww"
             >
               <div className="card-header">
                 <h2>{symbol}</h2>
@@ -166,26 +233,46 @@ function App() {
                   {isDisappeared ? "GONE" : "ACTIVE"}
                 </span>
               </div>
+              
               <div className="stat-row">
                 <span className="label">Volume:</span>
-                <span className="value">{latestUpdate ? latestUpdate.volume.toLocaleString() : "Loading..."}</span>
+                <span className="value">
+                  {latestUpdate 
+                    ? (typeof latestUpdate.volume === 'number' 
+                        ? latestUpdate.volume.toLocaleString() 
+                        : latestUpdate.volume)
+                    : "Loading..."}
+                </span>
               </div>
+              
               <div className="stat-row">
                 <span className="label">Change:</span>
                 <span className={`value ${latestUpdate && latestUpdate.change.includes('+') ? 'green' : 'red'}`}>
                   {latestUpdate ? latestUpdate.change : "0"}
                 </span>
               </div>
+              
               <div className="groww-section">
                 <div className={`badge ${growwInfo?.inMostBought ? 'badge-green' : 'badge-gray'}`}>
                   {growwInfo?.inMostBought ? "Groww Top Bought" : "Not in Top List"}
                 </div>
+                
                 {growwInfo?.shareholding && typeof growwInfo.shareholding === 'object' ? (
                   <div className="shareholding">
                     <strong>Shareholding:</strong>
-                    <ul>{Object.entries(growwInfo.shareholding).map(([key, val]) => (<li key={key}><span>{key}:</span> <span>{val}</span></li>))}</ul>
+                    <ul>
+                      {Object.entries(growwInfo.shareholding).map(([key, val]) => (
+                        <li key={key}>
+                          <span>{key}:</span> <span>{val}</span>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
-                ) : (<div className="shareholding-error">{typeof growwInfo?.shareholding === 'string' ? growwInfo.shareholding : "No Data"}</div>)}
+                ) : (
+                  <div className="shareholding-error">
+                    {typeof growwInfo?.shareholding === 'string' ? growwInfo.shareholding : "No Data"}
+                  </div>
+                )}
               </div>
             </div>
           );
@@ -197,7 +284,10 @@ function App() {
         <div className="table-wrapper">
           <table>
             <thead>
-              <tr><th>Time</th>{data.targetStocks.map(s => <th key={s}>{s}</th>)}</tr>
+              <tr>
+                <th>Time</th>
+                {data.targetStocks.map(s => <th key={s}>{s}</th>)}
+              </tr>
             </thead>
             <tbody>
               {data.history.slice().reverse().map((snap, index) => (
@@ -208,12 +298,22 @@ function App() {
                     const isGone = stockData?.status === "Disappeared";
                     return (
                       <td key={symbol} className={isGone ? "cell-disappeared" : ""}>
-                         {isGone ? <span className="red">Gone</span> : (
-                             <div>
-                                 <div className="cell-vol">{stockData?.volume.toLocaleString()}</div>
-                                 <div className={`cell-change ${stockData?.change.includes('+') ? 'green' : 'red'}`}>{stockData?.change}</div>
-                             </div>
-                         )}
+                        {isGone ? (
+                          <span className="red">Gone</span>
+                        ) : (
+                          <div>
+                            <div className="cell-vol">
+                              {stockData?.volume 
+                                ? (typeof stockData.volume === 'number' 
+                                    ? stockData.volume.toLocaleString() 
+                                    : stockData.volume)
+                                : "N/A"}
+                            </div>
+                            <div className={`cell-change ${stockData?.change.includes('+') ? 'green' : 'red'}`}>
+                              {stockData?.change || "0"}
+                            </div>
+                          </div>
+                        )}
                       </td>
                     );
                   })}
